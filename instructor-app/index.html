@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Instructor App</title>
+	<link rel="manifest" href="manifest.webmanifest" />
+	<meta name="theme-color" content="#0d6efd" />
+	<style>
+		body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+		section { margin-bottom: 16px; }
+		#qr { width: 320px; height: 320px; border: 1px solid #ccc; display: grid; place-items: center; }
+		input, button { padding: 8px; margin: 4px 0; width: 100%; max-width: 420px; }
+		ul { padding-left: 18px; }
+		.small { color: #555; font-size: 12px; }
+		.row { display:flex; gap:8px; flex-wrap:wrap; }
+	</style>
+</head>
+<body>
+	<h2>Instructor</h2>
+	<section id="login">
+		<h3>Login</h3>
+		<input id="classId" placeholder="Class ID (uuid)" />
+		<input id="code" placeholder="Instructor Code" />
+		<button id="loginBtn">Login</button>
+		<div id="loginStatus"></div>
+	</section>
+	<section id="session" style="display:none;">
+		<h3>Import Students (CSV id,name)</h3>
+		<form id="importForm" enctype="multipart/form-data">
+			<input type="file" id="csvFile" accept=".csv" required />
+			<button type="submit">Import CSV</button>
+		</form>
+		<div id="importStatus"></div>
+		
+		<h3>Attendance Session</h3>
+		<button id="startBtn">Start New Session</button>
+		<div id="sessInfo"></div>
+		<div id="qr"></div>
+		<div class="small" id="qrMeta"></div>
+		<div class="small" id="countdown"></div>
+		<div class="row" style="margin-top:12px;">
+			<button id="viewBtn">View Attendance</button>
+			<button id="exportClientBtn">Export to Excel File</button>
+		</div>
+		<div id="attStatus"></div>
+		<ul id="attList"></ul>
+	</section>
+	<script>
+		const state = { token: null, classId: null, sessionId: null, qrTimer: null, cdTimer: null, nextAt: 0, attendance: [] };
+		document.getElementById('loginBtn').onclick = async () => {
+			const classId = document.getElementById('classId').value.trim();
+			const instructorCode = document.getElementById('code').value.trim();
+			const res = await fetch('/api/instructor/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ classId, instructorCode })});
+			const data = await res.json();
+			if (res.ok) {
+				state.token = data.token; state.classId = classId;
+				document.getElementById('loginStatus').textContent = 'Logged in';
+				document.getElementById('session').style.display = '';
+				attachOrStart();
+			} else {
+				document.getElementById('loginStatus').textContent = data.error || 'Login failed';
+			}
+		};
+		async function attachOrStart() {
+			const r = await fetch(`/api/classes/${state.classId}/active-session?cb=${Date.now()}`);
+			const j = await r.json();
+			if (j.active) {
+				state.sessionId = j.sessionId; document.getElementById('sessInfo').textContent = `Active Session: ${j.sessionId}`; startQrLoop();
+			} else {
+				document.getElementById('sessInfo').textContent = 'No active session. Click Start New Session.';
+			}
+		}
+		document.getElementById('startBtn').onclick = async () => {
+			const start = Date.now();
+			const end = start + 90*60*1000;
+			if (navigator.onLine) {
+				const res = await fetch('/api/sessions/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ classId: state.classId, token: state.token })});
+				const data = await res.json();
+				if (!res.ok) { alert(data.error || 'Failed to start'); return; }
+				state.sessionId = data.sessionId;
+				document.getElementById('sessInfo').textContent = `Session: ${data.sessionId}`;
+				startQrLoop();
+			} else {
+				state.sessionId = crypto.randomUUID();
+				localStorage.setItem('pending-session', JSON.stringify({ classId: state.classId, sessionId: state.sessionId, start, end }));
+				document.getElementById('sessInfo').textContent = `Session (offline): ${state.sessionId}`;
+				startQrLoop();
+			}
+		};
+		window.addEventListener('online', async () => {
+			const pending = localStorage.getItem('pending-session');
+			if (pending) {
+				try {
+					const p = JSON.parse(pending);
+					const res = await fetch('/api/sessions/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
+					if (res.ok) localStorage.removeItem('pending-session');
+				} catch {}
+			}
+		});
+		async function refreshQr() {
+			if (!state.sessionId) return;
+			const res = await fetch('/api/sessions/qr?cb=' + Date.now(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: state.sessionId })});
+			const data = await res.json();
+			if (!res.ok) { document.getElementById('qr').textContent = data.error || 'QR error'; return; }
+			document.getElementById('qr').innerHTML = `<img src="${data.dataUrl}" alt="QR" style="width:100%;height:100%;object-fit:contain;"/>`;
+			document.getElementById('qrMeta').textContent = `Key: ${data.keyPreview}… • Key time: ${new Date(data.keyTs).toLocaleTimeString()}`;
+			try { await fetch('/api/sessions/key-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: state.sessionId, currentKey: data.currentKey, currentKeyTimestamp: data.keyTs })}); } catch {}
+			state.nextAt = (data.keyTs || Date.now()) + 40000;
+		}
+		function startQrLoop() {
+			clearInterval(state.qrTimer); clearInterval(state.cdTimer);
+			refreshQr();
+			state.qrTimer = setInterval(refreshQr, 40000);
+			state.cdTimer = setInterval(() => {
+				const left = Math.max(0, Math.round((state.nextAt - Date.now())/1000));
+				document.getElementById('countdown').textContent = `Next refresh in ${left}s`;
+			}, 500);
+		}
+		document.getElementById('viewBtn').onclick = async () => {
+			if (!state.sessionId) { alert('Start a session first'); return; }
+			const res = await fetch(`/api/classes/${state.classId}/attendance/${state.sessionId}?cb=${Date.now()}`);
+			const data = await res.json();
+			state.attendance = Array.isArray(data) ? data : [];
+			const list = document.getElementById('attList'); list.innerHTML = '';
+			document.getElementById('attStatus').textContent = `Total: ${state.attendance.length}`;
+			state.attendance.forEach(r => {
+				const li = document.createElement('li');
+				li.textContent = `${r.student_id} - ${r.name}`;
+				list.appendChild(li);
+			});
+		};
+		document.getElementById('exportClientBtn').onclick = () => {
+			// Build CSV from current in-memory list; add BOM and CRLF for Excel
+			const header = ['Student ID','Name','Time'];
+			
+			// Format timestamps in IST
+			const istOptions = {
+				timeZone: 'Asia/Kolkata',
+				year: 'numeric',
+				month: '2-digit',
+				day: '2-digit',
+				hour: '2-digit',
+				minute: '2-digit',
+				second: '2-digit',
+				hour12: true
+			};
+			
+			const rows = state.attendance.map(r => {
+				const istTime = new Date(r.scan_ts || Date.now()).toLocaleString('en-IN', istOptions);
+				return [r.student_id, r.name, istTime];
+			});
+			
+			let csv = '\uFEFF' + header.join(',') + '\r\n';
+			rows.forEach(row => {
+				const escaped = row.map(v => {
+					const s = String(v ?? '');
+					return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+				});
+				csv += escaped.join(',') + '\r\n';
+			});
+			const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			const d = new Date();
+			const yyyy = d.getFullYear();
+			const mm = String(d.getMonth()+1).padStart(2,'0');
+			const dd = String(d.getDate()).padStart(2,'0');
+			a.href = url;
+			a.download = `attendance_${yyyy}-${mm}-${dd}.csv`;
+			document.body.appendChild(a);
+			a.click();
+			URL.revokeObjectURL(url);
+			document.body.removeChild(a);
+		};
+		
+		// CSV Import functionality
+		document.getElementById('importForm').onsubmit = async (e) => {
+			e.preventDefault();
+			const fileInput = document.getElementById('csvFile');
+			const file = fileInput.files[0];
+			if (!file) {
+				document.getElementById('importStatus').textContent = 'Please select a CSV file';
+				return;
+			}
+			
+			const formData = new FormData();
+			formData.append('csvFile', file);
+			formData.append('classId', state.classId);
+			formData.append('token', state.token);
+			
+			try {
+				document.getElementById('importStatus').textContent = 'Importing...';
+				const res = await fetch('/api/instructor/import-students', {
+					method: 'POST',
+					body: formData
+				});
+				const data = await res.json();
+				
+				if (res.ok) {
+					document.getElementById('importStatus').textContent = `Import successful: ${data.count} students added.`;
+					fileInput.value = ''; // Clear the file input
+				} else {
+					document.getElementById('importStatus').textContent = `Error: ${data.error}`;
+				}
+			} catch (error) {
+				document.getElementById('importStatus').textContent = `Error: ${error.message}`;
+			}
+		};
+		if ('serviceWorker' in navigator) {
+			navigator.serviceWorker.register('/instructor/sw.js');
+		}
+	</script>
+</body>
+</html>

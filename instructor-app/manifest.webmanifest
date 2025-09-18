@@ -1,0 +1,9 @@
+{
+  "name": "Instructor Attendance",
+  "short_name": "Instructor",
+  "start_url": "/instructor/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0d6efd",
+  "icons": []
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Student Attendance",
+  "short_name": "Student",
+  "start_url": "/student/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#198754",
+  "icons": []
+}

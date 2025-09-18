@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Student App</title>
+	<link rel="manifest" href="manifest.webmanifest" />
+	<meta name="theme-color" content="#198754" />
+	<style>
+		body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+		video { width: 100%; max-width: 480px; border: 1px solid #ccc; }
+		canvas { display: none; }
+		section { margin-bottom: 16px; }
+		input, button { padding: 8px; margin: 4px 0; width: 100%; max-width: 420px; }
+		#status { margin-top: 8px; }
+	</style>
+</head>
+<body>
+	<h2>Student</h2>
+	<section>
+		<h3>Login</h3>
+		<input id="studentId" placeholder="Student ID" />
+		<button id="loginBtn">Login</button>
+		<div id="loginStatus"></div>
+	</section>
+	<section>
+		<h3>Mark Attendance</h3>
+		<button id="scanBtn">Scan Session QR</button>
+		<video id="video" playsinline></video>
+		<canvas id="canvas"></canvas>
+		<div id="status"></div>
+	</section>
+	<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+	<script>
+		const queueKey = 'attendance-queue-v1';
+		const state = { student: null, scanning: false, rafId: null, syncTimer: null };
+
+		document.getElementById('loginBtn').onclick = async () => {
+			const studentId = document.getElementById('studentId').value.trim();
+			const res = await fetch('/api/student/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ studentId }) });
+			const data = await res.json();
+			if (res.ok) {
+				state.student = data; localStorage.setItem('student', JSON.stringify(data));
+				document.getElementById('loginStatus').textContent = `Welcome ${data.name}`;
+				startAutoSync();
+			} else {
+				document.getElementById('loginStatus').textContent = data.error || 'Login failed';
+			}
+		};
+		(function restore(){
+			const saved = localStorage.getItem('student');
+			if (saved) { state.student = JSON.parse(saved); document.getElementById('studentId').value = state.student.studentId; document.getElementById('loginStatus').textContent = `Welcome ${state.student.name}`; }
+			startAutoSync();
+		})();
+
+		document.getElementById('scanBtn').onclick = async () => {
+			if (!state.student) { alert('Login first'); return; }
+			await startCamera();
+			scanLoop();
+		};
+
+		async function startCamera() {
+			const video = document.getElementById('video');
+			const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+			video.srcObject = stream; await video.play(); state.scanning = true; 
+		}
+
+		function scanLoop() {
+			const video = document.getElementById('video');
+			const canvas = document.getElementById('canvas');
+			const ctx = canvas.getContext('2d');
+			canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+			const img = ctx.getImageData(0,0,canvas.width,canvas.height);
+			const code = jsQR(img.data, img.width, img.height);
+			if (code && code.data) { handleQr(code.data); stopScan(); return; }
+			if (state.scanning) state.rafId = requestAnimationFrame(scanLoop);
+		}
+		function stopScan() {
+			state.scanning = false;
+			const v = document.getElementById('video');
+			if (v.srcObject) { v.srcObject.getTracks().forEach(t => t.stop()); v.srcObject = null; }
+		}
+		function enqueue(record) {
+			const q = JSON.parse(localStorage.getItem(queueKey) || '[]');
+			q.push(record); localStorage.setItem(queueKey, JSON.stringify(q));
+		}
+		async function handleQr(data) {
+			try {
+				const obj = JSON.parse(data);
+				const token = obj.t;
+				const scanTs = Date.now();
+				enqueue({ studentId: state.student.studentId, token, scanTs });
+				document.getElementById('status').textContent = 'Queued scan; syncing…';
+				trySync();
+			} catch (e) {
+				document.getElementById('status').textContent = 'Invalid QR';
+			}
+		}
+		async function trySync() {
+			let q = JSON.parse(localStorage.getItem(queueKey) || '[]');
+			if (q.length === 0) return;
+			for (let i=0;i<q.length;i++) {
+				const item = q[i];
+				try {
+					const res = await fetch('/api/attendance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
+					if (res.ok) { q.splice(i,1); i--; continue; }
+					const err = await res.json().catch(() => ({}));
+					if (err && err.error === 'stale token') {
+						q.splice(i,1); i--;
+						document.getElementById('status').textContent = 'Stale QR. Please rescan the latest code.';
+					} else {
+						document.getElementById('status').textContent = err && err.error ? err.error : 'Sync failed. Will retry.';
+					}
+				} catch {
+					document.getElementById('status').textContent = 'Offline. Will sync later.';
+				}
+			}
+			localStorage.setItem(queueKey, JSON.stringify(q));
+			if (q.length === 0) document.getElementById('status').textContent = 'Synced';
+		}
+		function startAutoSync() {
+			if (state.syncTimer) return;
+			state.syncTimer = setInterval(() => { if (navigator.onLine) trySync(); }, 15000);
+		}
+		window.addEventListener('online', trySync);
+		if ('serviceWorker' in navigator) {
+			navigator.serviceWorker.register('/student/sw.js');
+		}
+	</script>
+</body>
+</html>
