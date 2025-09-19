@@ -1,50 +1,26 @@
-# Use the official Node.js LTS Alpine image for smaller size
 FROM node:lts-alpine
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Install system dependencies needed by some packages
+# Install OS-level dependencies needed to build native modules (like sqlite3)
 RUN apk add --no-cache \
     python3 \
     make \
     g++ \
-    # sqlite3 dependencies
-    sqlite \
+    # Specifically for sqlite3:
     sqlite-dev
 
-# Copy package.json and package-lock.json for dependency installation
+# Copy package files
 COPY package*.json ./
 
-# Install project dependencies (production only)
-RUN npm ci --only=production
+# Install npm dependencies (this will now compile sqlite3 for Alpine)
+RUN npm install
 
-# Copy the rest of the application source code
+# Copy application source
 COPY . .
 
-# Create necessary directories if they don't exist
-RUN mkdir -p uploads logs
-
-# Expose the port the app runs on
+# Expose the port
 EXPOSE 3000
 
-# Set environment variables
-ENV NODE_ENV=production
-ENV PORT=3000
-
-# Create a non-root user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nodejs -u 1001
-
-# Change ownership of the app directory
-RUN chown -R nodejs:nodejs /app
-
-# Switch to non-root user
-USER nodejs
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node healthcheck.js || exit 1
-
-# Define the command to run the application
-CMD ["node", "src/app.js"]
+# Start the application
+CMD ["npm", "start"]
