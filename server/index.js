@@ -94,20 +94,29 @@ function startSessionRotation(sessionId, endTs) {
 
 // Create class (instructor setup)
 app.post('/api/classes', async (req, res) => {
-	const { name, instructorCode } = req.body;
+	const { name, instructorCode, id } = req.body;
 	if (!name || !instructorCode) return res.status(400).json({ error: 'name and instructorCode required' });
-	const id = uuidv4();
-	await db.run('INSERT INTO classes (id, name, instructor_code) VALUES (?, ?, ?)', [id, name, instructorCode]);
-	res.json({ id, name });
+	// Use provided ID or generate UUID as fallback
+	const classId = id || uuidv4();
+	await db.run('INSERT INTO classes (id, name, instructor_code) VALUES (?, ?, ?)', [classId, name, instructorCode]);
+	res.json({ id: classId, name });
 });
 
 // DEV SEED
 app.get('/api/dev/seed', async (req, res) => {
 	try {
-		const classId = uuidv4();
+		const classId = 'vitbclass123';
 		await db.run('INSERT INTO classes (id, name, instructor_code) VALUES (?, ?, ?)', [classId, 'CS101 Demo', 'teach123']);
 		res.json({ ok: true, classId, instructorCode: 'teach123', message: 'Class created. Use CSV import to add students.' });
 	} catch (e) { res.status(500).json({ error: 'seed failed', detail: String(e) }); }
+});
+
+// DEV: List all classes (for debugging)
+app.get('/api/dev/classes', async (req, res) => {
+	try {
+		const classes = await db.all('SELECT id, name, instructor_code FROM classes');
+		res.json({ classes });
+	} catch (e) { res.status(500).json({ error: 'failed to list classes', detail: String(e) }); }
 });
 
 // Instructor login -> JWT
